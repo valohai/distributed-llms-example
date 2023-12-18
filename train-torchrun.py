@@ -1,13 +1,20 @@
-import sys
 import argparse
-from datasets import load_dataset, load_metric
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-from tqdm import tqdm
-import torch
-from transformers import DataCollatorForSeq2Seq, TrainingArguments, Trainer, TrainerCallback
-import os
-import valohai
 import json
+import os
+import sys
+
+import torch
+import valohai
+from datasets import load_dataset
+from tqdm import tqdm
+from transformers import (
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
 
 import helpers
 
@@ -29,6 +36,7 @@ class ModelTrainer:
 
     def print_gpu_report(self):
         from subprocess import call
+
         print('torch.cuda.device_count() ', torch.cuda.device_count())
         print('self.device ', self.device)
         print('__Python VERSION:', sys.version)
@@ -37,8 +45,13 @@ class ModelTrainer:
         print('__CUDNN VERSION:', torch.backends.cudnn.version())
         print('__Number CUDA Devices:', torch.cuda.device_count())
         print('__Devices')
-        call(["nvidia-smi", "--format=csv",
-              "--query-gpu=index,name,driver_version,memory.total,memory.used,memory.free"])
+        call(
+            [
+                "nvidia-smi",
+                "--format=csv",
+                "--query-gpu=index,name,driver_version,memory.total,memory.used,memory.free",
+            ],
+        )
         print('Active CUDA Device: GPU', torch.cuda.current_device())
 
         print('Available devices ', torch.cuda.device_count())
@@ -48,22 +61,32 @@ class ModelTrainer:
         """split the dataset into smaller batches that we can process simultaneously
         Yield successive batch-sized chunks from list_of_elements."""
         for i in range(0, len(list_of_elements), self.batch_size):
-            yield list_of_elements[i: i + self.batch_size]
+            yield list_of_elements[i : i + self.batch_size]
 
     def calculate_metric_on_test_ds(self, dataset, metric):
         article_batches = list(self.generate_batch_sized_chunks(dataset['article']))
         target_batches = list(self.generate_batch_sized_chunks(dataset['highlights']))
 
         for article_batch, target_batch in tqdm(zip(article_batches, target_batches), total=len(article_batches)):
-            inputs = self.tokenizer(article_batch, max_length=1024, truncation=True,
-                                    padding="max_length", return_tensors="pt")
+            inputs = self.tokenizer(
+                article_batch,
+                max_length=1024,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
 
-            summaries = self.pretrained_model.generate(input_ids=inputs["input_ids"].to(self.device),
-                                                       attention_mask=inputs["attention_mask"].to(self.device),
-                                                       length_penalty=0.8, num_beams=8, max_length=128)
+            summaries = self.pretrained_model.generate(
+                input_ids=inputs["input_ids"].to(self.device),
+                attention_mask=inputs["attention_mask"].to(self.device),
+                length_penalty=0.8,
+                num_beams=8,
+                max_length=128,
+            )
 
-            decoded_summaries = [self.tokenizer.decode(s, skip_special_tokens=True,
-                                                       clean_up_tokenization_spaces=True) for s in summaries]
+            decoded_summaries = [
+                self.tokenizer.decode(s, skip_special_tokens=True, clean_up_tokenization_spaces=True) for s in summaries
+            ]
 
             decoded_summaries = [d.replace("", " ") for d in decoded_summaries]
 
@@ -76,12 +99,12 @@ class ModelTrainer:
         input_encodings = self.tokenizer(example_batch['dialogue'], padding="max_length", truncation=True)
 
         # with self.tokenizer.as_target_tokenizer():
-        target_encodings = self.tokenizer(text_target=example_batch['summary'], padding="max_length", truncation=True, )
+        target_encodings = self.tokenizer(text_target=example_batch['summary'], padding="max_length", truncation=True)
 
         return {
             'input_ids': input_encodings['input_ids'],
             'attention_mask': input_encodings['attention_mask'],
-            'labels': target_encodings['input_ids']
+            'labels': target_encodings['input_ids'],
         }
 
     def train(self, output_dir, train_dataset, eval_dataset):
@@ -90,20 +113,32 @@ class ModelTrainer:
         seq2seq_data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.pretrained_model)
 
         trainer_args = TrainingArguments(
-            output_dir=output_dir, num_train_epochs=self.num_epochs, warmup_steps=self.warmup_steps,
-            per_device_train_batch_size=self.batch_size, per_device_eval_batch_size=self.batch_size,
-            weight_decay=0.01, logging_steps=10, evaluation_strategy='steps', eval_steps=self.evaluation_steps,
-            save_steps=1e6, gradient_accumulation_steps=16, ddp_find_unused_parameters=False,
+            output_dir=output_dir,
+            num_train_epochs=self.num_epochs,
+            warmup_steps=self.warmup_steps,
+            per_device_train_batch_size=self.batch_size,
+            per_device_eval_batch_size=self.batch_size,
+            weight_decay=0.01,
+            logging_steps=10,
+            evaluation_strategy='steps',
+            eval_steps=self.evaluation_steps,
+            save_steps=1e6,
+            gradient_accumulation_steps=16,
+            ddp_find_unused_parameters=False,
         )
 
-        trainer = Trainer(model=self.pretrained_model, args=trainer_args, tokenizer=self.tokenizer,
-                          data_collator=seq2seq_data_collator, train_dataset=dataset_samsum_pt,
-                          eval_dataset=eval_dataset, callbacks=[PrinterCallback])
+        trainer = Trainer(
+            model=self.pretrained_model,
+            args=trainer_args,
+            tokenizer=self.tokenizer,
+            data_collator=seq2seq_data_collator,
+            train_dataset=dataset_samsum_pt,
+            eval_dataset=eval_dataset,
+            callbacks=[PrinterCallback],
+        )
 
         trainer.train()
         helpers.save_valohai_metadata(self.pretrained_model, output_dir)
-
-
 
 
 class PrinterCallback(TrainerCallback):
@@ -128,10 +163,19 @@ def run(args):
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(eval_dataset)}")
 
-    trainer = ModelTrainer(model_ckpt=args.model_ckpt, batch_size=args.batch_size, num_epochs=args.num_epochs,
-                           warmup_steps=args.warmup_steps, evaluation_steps=args.evaluation_steps)
+    trainer = ModelTrainer(
+        model_ckpt=args.model_ckpt,
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        warmup_steps=args.warmup_steps,
+        evaluation_steps=args.evaluation_steps,
+    )
 
-    trainer.train(output_dir=output_dir, train_dataset=train_dataset, eval_dataset=eval_dataset)
+    trainer.train(
+        output_dir=output_dir,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+    )
 
 
 if __name__ == '__main__':

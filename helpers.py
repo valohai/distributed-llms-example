@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import time
+
 import valohai
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +27,7 @@ def save_valohai_metadata(model, output_dir):
         with open(metadata_path, 'w') as outfile:
             json.dump(metadata, outfile)
 
+
 def get_run_identification():
     try:
         with open('/valohai/config/execution.json') as f:
@@ -35,4 +38,3 @@ def get_run_identification():
         project_name = 'test'
         exec_id = str(int(time.time()))
     return project_name, exec_id
-

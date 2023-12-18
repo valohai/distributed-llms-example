@@ -1,22 +1,26 @@
-import sys
-import logging
-import datetime
+import argparse
 import json
+import logging
+import os
+import sys
+
+import datasets
 import evaluate
 import numpy as np
-import argparse
-from torch.optim import AdamW
-import datasets
-from torch.utils.data import DataLoader
-from datasets import load_dataset, load_metric
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-from tqdm import tqdm
 import torch
-from transformers import DataCollatorForSeq2Seq, TrainingArguments, Trainer
-import os
-from accelerate import Accelerator
-from transformers import get_scheduler
 import valohai
+from accelerate import Accelerator
+from datasets import load_dataset
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import (
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+    get_scheduler,
+)
+
 import helpers
 
 os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = 'true'
@@ -48,6 +52,7 @@ class ModelTrainer:
 
     def print_gpu_report(self):
         from subprocess import call
+
         print('torch.cuda.device_count() ', torch.cuda.device_count())
         print('self.device ', self.device)
         print('__Python VERSION:', sys.version)
@@ -56,8 +61,13 @@ class ModelTrainer:
         print('__CUDNN VERSION:', torch.backends.cudnn.version())
         print('__Number CUDA Devices:', torch.cuda.device_count())
         print('__Devices')
-        call(["nvidia-smi", "--format=csv",
-              "--query-gpu=index,name,driver_version,memory.total,memory.used,memory.free"])
+        call(
+            [
+                "nvidia-smi",
+                "--format=csv",
+                "--query-gpu=index,name,driver_version,memory.total,memory.used,memory.free",
+            ],
+        )
         print('Active CUDA Device: GPU', torch.cuda.current_device())
 
         print('Available devices ', torch.cuda.device_count())
@@ -67,22 +77,32 @@ class ModelTrainer:
         """split the dataset into smaller batches that we can process simultaneously
         Yield successive batch-sized chunks from list_of_elements."""
         for i in range(0, len(list_of_elements), self.batch_size):
-            yield list_of_elements[i: i + self.batch_size]
+            yield list_of_elements[i : i + self.batch_size]
 
     def calculate_metric_on_test_ds(self, dataset, metric):
         article_batches = list(self.generate_batch_sized_chunks(dataset['article']))
         target_batches = list(self.generate_batch_sized_chunks(dataset['highlights']))
 
         for article_batch, target_batch in tqdm(zip(article_batches, target_batches), total=len(article_batches)):
-            inputs = self.tokenizer(article_batch, max_length=1024, truncation=True,
-                                    padding="max_length", return_tensors="pt")
+            inputs = self.tokenizer(
+                article_batch,
+                max_length=1024,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
 
-            summaries = self.pretrained_model.generate(input_ids=inputs["input_ids"].to(self.device),
-                                                       attention_mask=inputs["attention_mask"].to(self.device),
-                                                       length_penalty=0.8, num_beams=8, max_length=128)
+            summaries = self.pretrained_model.generate(
+                input_ids=inputs["input_ids"].to(self.device),
+                attention_mask=inputs["attention_mask"].to(self.device),
+                length_penalty=0.8,
+                num_beams=8,
+                max_length=128,
+            )
 
-            decoded_summaries = [self.tokenizer.decode(s, skip_special_tokens=True,
-                                                       clean_up_tokenization_spaces=True) for s in summaries]
+            decoded_summaries = [
+                self.tokenizer.decode(s, skip_special_tokens=True, clean_up_tokenization_spaces=True) for s in summaries
+            ]
 
             decoded_summaries = [d.replace("", " ") for d in decoded_summaries]
 
@@ -92,16 +112,24 @@ class ModelTrainer:
         return score
 
     def convert_examples_to_features(self, example_batch):
-        input_encodings = self.tokenizer(example_batch['dialogue'], padding="max_length", truncation=True,
-                                         max_length=1024)
+        input_encodings = self.tokenizer(
+            example_batch['dialogue'],
+            padding="max_length",
+            truncation=True,
+            max_length=1024,
+        )
 
-        target_encodings = self.tokenizer(text_target=example_batch['summary'], padding="max_length", truncation=True,
-                                          max_length=128)
+        target_encodings = self.tokenizer(
+            text_target=example_batch['summary'],
+            padding="max_length",
+            truncation=True,
+            max_length=128,
+        )
 
         return {
             'input_ids': input_encodings['input_ids'],
             'attention_mask': input_encodings['attention_mask'],
-            'labels': target_encodings['input_ids']
+            'labels': target_encodings['input_ids'],
         }
 
     def synchronize_and_aggregate_metrics(self, metrics):
@@ -113,20 +141,32 @@ class ModelTrainer:
 
     def train(self, output_dir, train_dataset, eval_dataset):
         column_names = train_dataset.column_names
-        train_dataset_samsum_pt = train_dataset.map(self.convert_examples_to_features, batched=True,
-                                                    remove_columns=column_names)
-        eval_dataset_samsum_pt = eval_dataset.map(self.convert_examples_to_features, batched=True,
-                                                  remove_columns=column_names)
+        train_dataset_samsum_pt = train_dataset.map(
+            self.convert_examples_to_features,
+            batched=True,
+            remove_columns=column_names,
+        )
+        eval_dataset_samsum_pt = eval_dataset.map(
+            self.convert_examples_to_features,
+            batched=True,
+            remove_columns=column_names,
+        )
 
-        seq2seq_data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.pretrained_model,
-                                                       pad_to_multiple_of=8 if self.accelerator.mixed_precision == 'fp16' else None)
+        seq2seq_data_collator = DataCollatorForSeq2Seq(
+            self.tokenizer,
+            model=self.pretrained_model,
+            pad_to_multiple_of=8 if self.accelerator.mixed_precision == 'fp16' else None,
+        )
         # train_dataset_samsum_pt = train_dataset_samsum_pt.shard(num_shards=10,
         #                                                         index=0)  # Cut part of the train dataset to speed up testing
         # eval_dataset_samsum_pt = eval_dataset_samsum_pt.shard(num_shards=10,
         #                                                       index=0)  # Cut part of the train dataset to speed up testing
 
         train_dataloader = DataLoader(
-            train_dataset_samsum_pt, shuffle=True, collate_fn=seq2seq_data_collator, batch_size=1
+            train_dataset_samsum_pt,
+            shuffle=True,
+            collate_fn=seq2seq_data_collator,
+            batch_size=1,
         )
 
         eval_dataloader = DataLoader(eval_dataset_samsum_pt, collate_fn=seq2seq_data_collator, batch_size=1)
@@ -134,8 +174,9 @@ class ModelTrainer:
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in self.pretrained_model.named_parameters() if
-                           not any(nd in n for nd in no_decay)],
+                "params": [
+                    p for n, p in self.pretrained_model.named_parameters() if not any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": 0.0,
             },
             {
@@ -146,7 +187,10 @@ class ModelTrainer:
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
         model, optimizer, train_dataloader, eval_dataloader = self.accelerator.prepare(
-            self.pretrained_model, optimizer, train_dataloader, eval_dataloader
+            self.pretrained_model,
+            optimizer,
+            train_dataloader,
+            eval_dataloader,
         )
         self.logger.info("***** Accelerator prepared for training *****")
 
@@ -157,7 +201,7 @@ class ModelTrainer:
             name='linear',
             optimizer=optimizer,
             num_training_steps=max_train_steps,
-            num_warmup_steps=1
+            num_warmup_steps=1,
         )
 
         metric = evaluate.load("rouge")
@@ -205,7 +249,9 @@ class ModelTrainer:
                     )
 
                     generated_tokens = self.accelerator.pad_across_processes(
-                        generated_tokens, dim=1, pad_index=self.tokenizer.pad_token_id
+                        generated_tokens,
+                        dim=1,
+                        pad_index=self.tokenizer.pad_token_id,
                     )
                     labels = batch["labels"]
                     generated_tokens = self.accelerator.gather(generated_tokens).cpu().numpy()
@@ -236,6 +282,7 @@ class ModelTrainer:
     def dump_valohai_metadata(self, logs):
         print(json.dumps(logs))
 
+
 def run(args):
     output_dir = valohai.outputs().path(args.output_dir)
 
@@ -253,11 +300,19 @@ def run(args):
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(eval_dataset)}")
 
-    trainer = ModelTrainer(model_ckpt=args.model_ckpt, batch_size=args.batch_size, num_epochs=args.num_epochs,
-                           warmup_steps=args.warmup_steps, evaluation_steps=args.evaluation_steps)
+    trainer = ModelTrainer(
+        model_ckpt=args.model_ckpt,
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        warmup_steps=args.warmup_steps,
+        evaluation_steps=args.evaluation_steps,
+    )
 
-    trainer.train(output_dir=output_dir, train_dataset=train_dataset,
-                  eval_dataset=eval_dataset)
+    trainer.train(
+        output_dir=output_dir,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+    )
 
 
 if __name__ == '__main__':
